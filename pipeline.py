@@ -260,3 +260,49 @@ if __name__ == "__main__":
     )
     runner = PipeLine(data_load, feature_extractor, model, n_components=128)
     runner.run()
+
+
+
+
+import cv2
+import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import normalize
+from sklearn.svm import SVC
+
+# --- PHẦN CỦA AN: TRÍCH XUẤT ĐẶC TRƯNG SIFT ---
+class SIFTFeatureExtractor:
+    def __init__(self, n_clusters=100):
+        self.sift = cv2.SIFT_create()
+        self.n_clusters = n_clusters
+        self.kmeans = KMeans(n_clusters=self.n_clusters, random_state=42, n_init=10)
+
+    def extract_features(self, images):
+        descriptors_list = []
+        valid_indices = []
+        
+        print("An đang trích xuất SIFT descriptors...")
+        for i, img in enumerate(images):
+            # SIFT cần ảnh 8-bit (0-255)
+            img_8bit = (img * 255).astype('uint8') if img.max() <= 1.0 else img.astype('uint8')
+            kp, des = self.sift.detectAndCompute(img_8bit, None)
+            if des is not None:
+                descriptors_list.append(des)
+                valid_indices.append(i)
+        
+        # Gom cụm descriptors thành 'từ điển'
+        all_des = np.vstack(descriptors_list)
+        self.kmeans.fit(all_des)
+        
+        # Tạo vector histogram cho mỗi ảnh
+        features = np.zeros((len(images), self.n_clusters))
+        for i, idx in enumerate(valid_indices):
+            words = self.kmeans.predict(descriptors_list[i])
+            for w in words:
+                features[idx][w] += 1
+        
+        return normalize(features, norm='l2')
+
+# --- PHẦN CỦA AN: KHỞI TẠO MÔ HÌNH SVM ---
+def get_svm_model():
+    return SVC(kernel='rbf', C=1.0, gamma='scale', probability=True)
