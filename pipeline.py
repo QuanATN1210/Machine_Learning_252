@@ -277,7 +277,7 @@ class SIFTFeatureExtractor:
         self.n_clusters = n_clusters
         self.kmeans = KMeans(n_clusters=self.n_clusters, random_state=42, n_init=10)
 
-    def extract_features(self, images):
+    def extract(self, images):
         descriptors_list = []
         valid_indices = []
         
