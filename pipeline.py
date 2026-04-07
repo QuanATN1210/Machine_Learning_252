@@ -266,7 +266,7 @@ if __name__ == "__main__":
 
 import cv2
 import numpy as np
-from sklearn.cluster import KMeans
+from sklearn.cluster import MiniBatchKMeans
 from sklearn.preprocessing import normalize
 from sklearn.svm import SVC
 
@@ -275,13 +275,13 @@ class SIFTFeatureExtractor:
     def __init__(self, n_clusters=100):
         self.sift = cv2.SIFT_create()
         self.n_clusters = n_clusters
-        self.kmeans = KMeans(n_clusters=self.n_clusters, random_state=42, n_init=10)
+        self.kmeans = MiniBatchKMeans(n_clusters=self.n_clusters, random_state=42, batch_size=1024, n_init=3)
 
     def extract(self, images):
         descriptors_list = []
         valid_indices = []
         
-        print("An đang trích xuất SIFT descriptors...")
+        print("Đang trích xuất SIFT descriptors...")
         for i, img in enumerate(images):
             # SIFT cần ảnh 8-bit (0-255)
             img_8bit = (img * 255).astype('uint8') if img.max() <= 1.0 else img.astype('uint8')
