@@ -1,14 +1,17 @@
 from pathlib import Path
 import time
 
+import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 from skimage.feature import hog
 from sklearn.decomposition import PCA
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
@@ -112,29 +115,82 @@ class LoadData:
 
 
 class BaseModel:
+    supports_feature_importance = False
+
+    def __init__(self, param_grid=None, cv=5, scoring="accuracy", search_n_jobs=-1, **kwargs):
+        self.param_grid = param_grid
+        self.cv = cv
+        self.scoring = scoring
+        self.search_n_jobs = search_n_jobs
+        self.kwargs = kwargs
+        self.model = None
+
     def build(self):
         raise NotImplementedError
 
+    def fit(self, X_train, y_train):
+        estimator = self.build()
+
+        if self.param_grid:
+            grid_search = GridSearchCV(
+                estimator=estimator,
+                param_grid=self.param_grid,
+                cv=self.cv,
+                scoring=self.scoring,
+                n_jobs=self.search_n_jobs,
+                return_train_score=False,
+            )
+            grid_search.fit(X_train, y_train)
+
+            print("Grid search results:")
+            for mean_score, std_score, params in zip(
+                grid_search.cv_results_["mean_test_score"],
+                grid_search.cv_results_["std_test_score"],
+                grid_search.cv_results_["params"],
+            ):
+                print(f"mean_test_score={mean_score:.4f} std={std_score:.4f} params={params}")
+
+            print(f"Best params: {grid_search.best_params_}")
+            print(f"Best CV score: {grid_search.best_score_:.4f}")
+            self.model = grid_search.best_estimator_
+        else:
+            estimator.fit(X_train, y_train)
+            self.model = estimator
+
+        return self.model
+
+    def predict(self, X_test):
+        if self.model is None:
+            raise ValueError("Model has not been fitted yet.")
+        return self.model.predict(X_test)
+
+    def get_feature_importances(self):
+        if self.model is not None and hasattr(self.model, "feature_importances_"):
+            return self.model.feature_importances_
+        return None
+
+
+class DecisionTreeModel(BaseModel):
+    supports_feature_importance = True
+
+    def build(self):
+        return DecisionTreeClassifier(**self.kwargs)
+
 
 class SVMModel(BaseModel):
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-
     def build(self):
         return SVC(**self.kwargs)
 
 
 class RandomForestModel(BaseModel):
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
+    supports_feature_importance = True
 
     def build(self):
         return RandomForestClassifier(**self.kwargs)
 
 
 class XGBoostModel(BaseModel):
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
+    supports_feature_importance = True
 
     def build(self):
         from xgboost import XGBClassifier
@@ -143,11 +199,13 @@ class XGBoostModel(BaseModel):
 
 
 class LogisticRegressionModel(BaseModel):
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-
     def build(self):
         return LogisticRegression(**self.kwargs)
+
+
+class KNNModel(BaseModel):
+    def build(self):
+        return KNeighborsClassifier(**self.kwargs)
 
 
 
@@ -191,7 +249,7 @@ class PipeLine:
     def __init__(self, data_load, feature_extractor, model, n_components=None):
         self.data_load = data_load
         self.feature_extractor = feature_extractor
-        self.model = model.build()
+        self.model = model
         self.n_components = n_components
 
     def run(self):
@@ -239,6 +297,22 @@ class PipeLine:
             )
         )
 
+        if self.model.supports_feature_importance:
+            importances = self.model.get_feature_importances()
+            if importances is not None:
+                self._plot_feature_importance(importances)
+
+    def _plot_feature_importance(self, importances):
+        feature_indices = np.arange(len(importances))
+
+        plt.figure(figsize=(14, 6))
+        plt.bar(feature_indices, importances)
+        plt.xlabel("PCA Feature Index")
+        plt.ylabel("Importance")
+        plt.title("Feature Importance After PCA")
+        plt.tight_layout()
+        plt.show()
+
 
 if __name__ == "__main__":
     data_load = LoadData(
@@ -253,8 +327,15 @@ if __name__ == "__main__":
         cells_per_block=(2, 2),
         transform_sqrt=True,
     )
+
+    rf_param_grid = {
+        "n_estimators": [50, 100, 200],
+        "max_depth": [None, 10, 20],
+        "min_samples_split": [2, 5],
+    }
+
     model = RandomForestModel(
-        n_estimators=300,
+        param_grid=rf_param_grid,
         random_state=42,
         n_jobs=-1,
     )
