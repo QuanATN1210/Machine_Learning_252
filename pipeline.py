@@ -347,43 +347,88 @@ if __name__ == "__main__":
 
 import cv2
 import numpy as np
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.cluster import MiniBatchKMeans
 from sklearn.preprocessing import normalize
 from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
 
-# --- PHẦN CỦA AN: TRÍCH XUẤT ĐẶC TRƯNG SIFT ---
-class SIFTFeatureExtractor:
+# --- PHẦN TRÍCH XUẤT ĐẶC TRƯNG SIFT (BAG OF VISUAL WORDS) ---
+class SIFTFeatureExtractor(BaseEstimator, TransformerMixin):
     def __init__(self, n_clusters=100):
-        self.sift = cv2.SIFT_create()
         self.n_clusters = n_clusters
+        self.sift = cv2.SIFT_create()
         self.kmeans = MiniBatchKMeans(n_clusters=self.n_clusters, random_state=42, batch_size=1024, n_init=3)
+        self.visual_words = None
 
-    def extract(self, images):
+    def _get_descriptors(self, images):
         descriptors_list = []
-        valid_indices = []
-        
-        print("Đang trích xuất SIFT descriptors...")
-        for i, img in enumerate(images):
-            # SIFT cần ảnh 8-bit (0-255)
+        for img in images:
+            # Chuyển sang 8-bit nếu cần
             img_8bit = (img * 255).astype('uint8') if img.max() <= 1.0 else img.astype('uint8')
+            # Nếu ảnh có 3 kênh (RGB), chuyển sang Gray
+            if len(img_8bit.shape) == 3:
+                img_8bit = cv2.cvtColor(img_8bit, cv2.COLOR_RGB2GRAY)
+                
             kp, des = self.sift.detectAndCompute(img_8bit, None)
             if des is not None:
                 descriptors_list.append(des)
-                valid_indices.append(i)
-        
-        # Gom cụm descriptors thành 'từ điển'
-        all_des = np.vstack(descriptors_list)
+            else:
+                # Nếu không tìm thấy keypoint, trả về vector 0 để không lệch mảng
+                descriptors_list.append(np.zeros((1, 128)))
+        return descriptors_list
+
+    def fit(self, X, y=None):
+        print(f"SIFT: Đang gom cụm {self.n_clusters} từ điển hình ảnh...")
+        descriptors_list = self._get_descriptors(X)
+        all_des = np.vstack([d for d in descriptors_list if d is not None])
         self.kmeans.fit(all_des)
+        return self
+
+    def transform(self, X):
+        print("SIFT: Đang tạo vector histogram...")
+        descriptors_list = self._get_descriptors(X)
+        features = np.zeros((len(X), self.n_clusters))
         
-        # Tạo vector histogram cho mỗi ảnh
-        features = np.zeros((len(images), self.n_clusters))
-        for i, idx in enumerate(valid_indices):
-            words = self.kmeans.predict(descriptors_list[i])
-            for w in words:
-                features[idx][w] += 1
+        for i, des in enumerate(descriptors_list):
+            if des is not None and len(des) > 0:
+                words = self.kmeans.predict(des)
+                for w in words:
+                    features[i][w] += 1
         
+        # Normalize để vector có độ dài đơn vị (L2 norm)
         return normalize(features, norm='l2')
 
-# --- PHẦN CỦA AN: KHỞI TẠO MÔ HÌNH SVM ---
+# --- PHẦN MÔ HÌNH SVM ---
 def get_svm_model():
-    return SVC(kernel='rbf', C=1.0, gamma='scale', probability=True)
+    """
+    Hàm khởi tạo SVM theo yêu cầu của An
+    """
+    return SVC(kernel='rbf', C=10.0, gamma='scale', probability=True)
+
+# --- PHẦN MÔ HÌNH DECISION TREE (ĐỂ LẤY FEATURE IMPORTANCE) ---
+def get_decision_tree_model():
+    """
+    Dùng để chụp ảnh Feature Importance theo yêu cầu nhóm trưởng
+    """
+    return DecisionTreeClassifier(max_depth=12, random_state=42)
+
+# --- CÁCH CHẠY VÀ LẤY FEATURE IMPORTANCE TRÊN COLAB ---
+"""
+# 1. Trích xuất đặc trưng (Ví dụ dùng HOG theo pipeline chung của nhóm)
+# extractor = HOGFeatureExtractor() 
+# X_train_features = extractor.fit_transform(X_train)
+
+# 2. Train Decision Tree
+# dt_model = get_decision_tree_model()
+# dt_model.fit(X_train_features, y_train)
+
+# 3. Vẽ Feature Importance
+# import matplotlib.pyplot as plt
+# importances = dt_model.feature_importances_
+# plt.figure(figsize=(10, 4))
+# plt.bar(range(len(importances)), importances)
+# plt.title("Feature Importance từ Decision Tree (An)")
+# plt.savefig("feature_importance_an.png") # Chụp ảnh này lại gửi nhóm
+# plt.show()
+"""
