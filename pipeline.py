@@ -354,49 +354,45 @@ from sklearn.svm import SVC
 from sklearn.tree import DecisionTreeClassifier
 
 # --- PHẦN TRÍCH XUẤT ĐẶC TRƯNG SIFT (BAG OF VISUAL WORDS) ---
-class SIFTFeatureExtractor(BaseEstimator, TransformerMixin):
+class SIFTFeatureExtractor:
     def __init__(self, n_clusters=100):
         self.n_clusters = n_clusters
         self.sift = cv2.SIFT_create()
         self.kmeans = MiniBatchKMeans(n_clusters=self.n_clusters, random_state=42, batch_size=1024, n_init=3)
-        self.visual_words = None
+        self.is_fitted = False  # Kiểm tra xem đã tạo từ điển chưa
 
     def _get_descriptors(self, images):
         descriptors_list = []
         for img in images:
-            # Chuyển sang 8-bit nếu cần
             img_8bit = (img * 255).astype('uint8') if img.max() <= 1.0 else img.astype('uint8')
-            # Nếu ảnh có 3 kênh (RGB), chuyển sang Gray
             if len(img_8bit.shape) == 3:
                 img_8bit = cv2.cvtColor(img_8bit, cv2.COLOR_RGB2GRAY)
-                
             kp, des = self.sift.detectAndCompute(img_8bit, None)
             if des is not None:
                 descriptors_list.append(des)
             else:
-                # Nếu không tìm thấy keypoint, trả về vector 0 để không lệch mảng
                 descriptors_list.append(np.zeros((1, 128)))
         return descriptors_list
 
-    def fit(self, X, y=None):
-        print(f"SIFT: Đang gom cụm {self.n_clusters} từ điển hình ảnh...")
+    def extract(self, X):
         descriptors_list = self._get_descriptors(X)
-        all_des = np.vstack([d for d in descriptors_list if d is not None])
-        self.kmeans.fit(all_des)
-        return self
-
-    def transform(self, X):
-        print("SIFT: Đang tạo vector histogram...")
-        descriptors_list = self._get_descriptors(X)
-        features = np.zeros((len(X), self.n_clusters))
         
+        # Nếu chưa fitted (lần đầu gọi cho tập Train), thì chạy KMeans fit
+        if not self.is_fitted:
+            print(f"SIFT: Đang tạo từ điển với {self.n_clusters} cụm...")
+            all_des = np.vstack([d for d in descriptors_list if d is not None])
+            self.kmeans.fit(all_des)
+            self.is_fitted = True
+        
+        # Tạo vector histogram
+        print("SIFT: Đang trích xuất đặc trưng...")
+        features = np.zeros((len(X), self.n_clusters))
         for i, des in enumerate(descriptors_list):
             if des is not None and len(des) > 0:
                 words = self.kmeans.predict(des)
                 for w in words:
                     features[i][w] += 1
         
-        # Normalize để vector có độ dài đơn vị (L2 norm)
         return normalize(features, norm='l2')
 
 # --- PHẦN MÔ HÌNH SVM ---
