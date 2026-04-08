@@ -266,7 +266,7 @@ class PipeLine:
         
         ############## PCA ########################
         if self.n_components is not None:
-            pca = PCA(n_components=self.n_components, svd_solver="full")
+            pca = PCA(n_components=self.n_components, svd_solver="randomized", random_state=42)
             X_train_pca = pca.fit_transform(X_train_scaled)
             X_test_pca = pca.transform(X_test_scaled)
         else:
