@@ -1,15 +1,17 @@
 from pathlib import Path
 import time
+import json
 
 import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 from skimage.feature import hog
+from sklearn.cluster import MiniBatchKMeans
 from sklearn.decomposition import PCA
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report
+from sklearn.metrics import accuracy_score, classification_report, precision_recall_fscore_support
 from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
@@ -269,24 +271,213 @@ class HOGFeatureExtractor:
         return np.asarray(features, dtype=np.float32)
 
 
+class SIFTFeatureExtractor:
+    def __init__(self, nfeatures=0, n_clusters=300, random_state=42, batch_size=2048):
+        self.nfeatures = nfeatures
+        self.n_clusters = n_clusters
+        self.random_state = random_state
+        self.batch_size = batch_size
+        self.kmeans = None
+        self._sift = None
+
+    def _get_sift(self):
+        if self._sift is not None:
+            return self._sift
+
+        try:
+            import cv2
+        except ImportError as error:
+            raise ImportError(
+                "OpenCV is required for SIFTFeatureExtractor. Install with `pip install opencv-contrib-python`."
+            ) from error
+
+        self._sift = cv2.SIFT_create(nfeatures=self.nfeatures)
+        return self._sift
+
+    def _to_gray_uint8(self, image):
+        arr = np.asarray(image)
+        if arr.ndim == 3:
+            arr = np.mean(arr, axis=-1)
+        if arr.dtype != np.uint8:
+            arr = np.clip(arr, 0.0, 1.0) if arr.max() <= 1.0 else np.clip(arr, 0.0, 255.0)
+            arr = (arr * 255.0 if arr.max() <= 1.0 else arr).astype(np.uint8)
+        return arr
+
+    def _extract_descriptors(self, image):
+        gray = self._to_gray_uint8(image)
+        sift = self._get_sift()
+        _, descriptors = sift.detectAndCompute(gray, None)
+        return descriptors
+
+    def fit(self, X):
+        all_descriptors = []
+
+        for image in X:
+            descriptors = self._extract_descriptors(image)
+            if descriptors is not None and len(descriptors) > 0:
+                all_descriptors.append(descriptors)
+
+        if not all_descriptors:
+            raise ValueError("SIFT could not extract any descriptors from training images.")
+
+        stacked = np.vstack(all_descriptors).astype(np.float32)
+        self.kmeans = MiniBatchKMeans(
+            n_clusters=self.n_clusters,
+            random_state=self.random_state,
+            batch_size=self.batch_size,
+            n_init=10,
+        )
+        self.kmeans.fit(stacked)
+        return self
+
+    def transform(self, X):
+        if self.kmeans is None:
+            raise ValueError("SIFTFeatureExtractor has not been fitted yet.")
+
+        features = []
+        for image in X:
+            descriptors = self._extract_descriptors(image)
+
+            hist = np.zeros(self.n_clusters, dtype=np.float32)
+            if descriptors is not None and len(descriptors) > 0:
+                visual_words = self.kmeans.predict(descriptors.astype(np.float32))
+                hist = np.bincount(visual_words, minlength=self.n_clusters).astype(np.float32)
+
+            norm = np.linalg.norm(hist)
+            if norm > 0:
+                hist /= norm
+            features.append(hist)
+
+        return np.asarray(features, dtype=np.float32)
+
+    def fit_transform(self, X):
+        self.fit(X)
+        return self.transform(X)
+
+    def extract(self, X):
+        if self.kmeans is None:
+            return self.fit_transform(X)
+        return self.transform(X)
+
+
+def prepare_dataset(data_load, feature_extractor=None):
+    X_train, y_train, X_test, y_test = data_load.load_data()
+
+    if feature_extractor is not None:
+        if hasattr(feature_extractor, "fit_transform") and hasattr(feature_extractor, "transform"):
+            X_train = feature_extractor.fit_transform(X_train)
+            X_test = feature_extractor.transform(X_test)
+        else:
+            X_train = feature_extractor.extract(X_train)
+            X_test = feature_extractor.extract(X_test)
+    else:
+        X_train = X_train.reshape(X_train.shape[0], -1)
+        X_test = X_test.reshape(X_test.shape[0], -1)
+
+    X_train = np.asarray(X_train)
+    X_test = np.asarray(X_test)
+    y_train = np.asarray(y_train)
+    y_test = np.asarray(y_test)
+
+    if X_train.ndim != 2 or X_test.ndim != 2:
+        raise ValueError(
+            f"Expected 2D feature matrices after extraction, got X_train.ndim={X_train.ndim}, X_test.ndim={X_test.ndim}."
+        )
+
+    if X_train.shape[0] != y_train.shape[0]:
+        raise ValueError(
+            f"Mismatched train samples: X_train has {X_train.shape[0]} rows but y_train has {y_train.shape[0]} labels."
+        )
+
+    if X_test.shape[0] != y_test.shape[0]:
+        raise ValueError(
+            f"Mismatched test samples: X_test has {X_test.shape[0]} rows but y_test has {y_test.shape[0]} labels."
+        )
+
+    return {
+        "X_train": np.asarray(X_train, dtype=np.float32),
+        "y_train": y_train,
+        "X_test": np.asarray(X_test, dtype=np.float32),
+        "y_test": y_test,
+        "idx2label": data_load.idx2label,
+    }
+
+
+def save_prepared_dataset(prepared_data, file_path):
+    path = Path(file_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    idx2label_json = json.dumps({int(k): v for k, v in prepared_data["idx2label"].items()})
+    np.savez_compressed(
+        path,
+        X_train=prepared_data["X_train"],
+        y_train=prepared_data["y_train"],
+        X_test=prepared_data["X_test"],
+        y_test=prepared_data["y_test"],
+        idx2label=np.asarray([idx2label_json], dtype=object),
+    )
+
+
+def load_prepared_dataset(file_path):
+    with np.load(file_path, allow_pickle=True) as data:
+        idx2label = json.loads(str(data["idx2label"][0]))
+        idx2label = {int(k): v for k, v in idx2label.items()}
+        return {
+            "X_train": data["X_train"],
+            "y_train": data["y_train"],
+            "X_test": data["X_test"],
+            "y_test": data["y_test"],
+            "idx2label": idx2label,
+        }
+
+
 class PipeLine:
-    def __init__(self, data_load, feature_extractor, model, n_components=None):
+    def __init__(
+        self,
+        data_load=None,
+        feature_extractor=None,
+        model=None,
+        n_components=None,
+        prepared_data=None,
+    ):
         self.data_load = data_load
         self.feature_extractor = feature_extractor
         self.model = model
         self.n_components = n_components
+        self.prepared_data = prepared_data
+        self.train_times = []
+        self.inference_times = []
+        self.metrics_history = []
 
     def run(self):
-        X_train, y_train, X_test, y_test = self.data_load.load_data()
-        
-        ############# Feature extraction #############
-        if self.feature_extractor is not None:
-            X_train = self.feature_extractor.extract(X_train)
-            X_test = self.feature_extractor.extract(X_test)
+        if self.model is None:
+            raise ValueError("model is required to run the pipeline.")
+
+        if self.prepared_data is None and self.data_load is None:
+            raise ValueError("Either prepared_data or data_load must be provided.")
+
+        if self.prepared_data is not None:
+            X_train = self.prepared_data["X_train"]
+            y_train = self.prepared_data["y_train"]
+            X_test = self.prepared_data["X_test"]
+            y_test = self.prepared_data["y_test"]
+            idx2label = self.prepared_data.get("idx2label", {})
         else:
-            # Learn directly on images: flatten (N, H, W) to (N, H*W)
-            X_train = X_train.reshape(X_train.shape[0], -1)
-            X_test = X_test.reshape(X_test.shape[0], -1)
+            X_train, y_train, X_test, y_test = self.data_load.load_data()
+            idx2label = self.data_load.idx2label
+
+            ############# Feature extraction #############
+            if self.feature_extractor is not None:
+                if hasattr(self.feature_extractor, "fit_transform") and hasattr(self.feature_extractor, "transform"):
+                    X_train = self.feature_extractor.fit_transform(X_train)
+                    X_test = self.feature_extractor.transform(X_test)
+                else:
+                    X_train = self.feature_extractor.extract(X_train)
+                    X_test = self.feature_extractor.extract(X_test)
+            else:
+                # Learn directly on images: flatten (N, H, W) to (N, H*W)
+                X_train = X_train.reshape(X_train.shape[0], -1)
+                X_test = X_test.reshape(X_test.shape[0], -1)
         
         ############# Standardization #############
         scaler = StandardScaler()
@@ -312,16 +503,49 @@ class PipeLine:
         y_pred = self.model.predict(X_test_pca)
         inference_time = time.time() - start_inference
 
-        idx2label = self.data_load.idx2label
+        if not idx2label:
+            idx2label = {idx: str(idx) for idx in np.unique(y_train)}
+
+        accuracy = accuracy_score(y_test, y_pred)
+        precision, recall, f1_score, _ = precision_recall_fscore_support(
+            y_test,
+            y_pred,
+            average="macro",
+            zero_division=0,
+        )
+
+        self.train_times.append(train_time)
+        self.inference_times.append(inference_time)
+
+        metrics = {
+            "accuracy": float(accuracy),
+            "recall": float(recall),
+            "precision": float(precision),
+            "f1_score": float(f1_score),
+            "train_time": float(train_time),
+            "inference_time": float(inference_time),
+            "train_times": list(self.train_times),
+            "inference_times": list(self.inference_times),
+        }
+        self.metrics_history.append(metrics)
+
+        print(f"Accuracy: {accuracy:.4f}")
+        print(f"Recall (macro): {recall:.4f}")
+        print(f"Precision (macro): {precision:.4f}")
+        print(f"F1-score (macro): {f1_score:.4f}")
         print(f"Train time: {train_time:.4f}s")
         print(f"Inference time: {inference_time:.4f}s")
+
+        labels = sorted(idx2label.keys())
+        target_names = [idx2label[i] for i in labels]
+
         print("Classification report (test):")
         print(
             classification_report(
                 y_test,
                 y_pred,
-                labels=list(range(len(idx2label))),
-                target_names=[idx2label[i] for i in range(len(idx2label))],
+                labels=labels,
+                target_names=target_names,
                 zero_division=0,
             )
         )
@@ -330,6 +554,8 @@ class PipeLine:
             importances = self.model.get_feature_importances()
             if importances is not None:
                 self._plot_feature_importance(importances)
+
+        return metrics
 
     def _plot_feature_importance(self, importances):
         feature_indices = np.arange(len(importances))
@@ -341,30 +567,3 @@ class PipeLine:
         plt.title("Feature Importance After PCA")
         plt.tight_layout()
         plt.show()
-
-
-if __name__ == "__main__":
-    data_load = LoadData(
-        path=r"./classification_task",
-        image_size=(128, 128),
-        color_mode="grayscale",
-        normalize=True,
-    )
-    feature_extractor = HOGFeatureExtractor(
-        orientations=9,
-        pixels_per_cell=(8, 8),
-        cells_per_block=(2, 2),
-        transform_sqrt=True,
-    )
-
-    mlp_model = MLPModel(
-        hidden_layer_sizes=(512, 256),
-        activation="relu",
-        solver="adam",
-        max_iter=300,
-        early_stopping=True,
-        random_state=42,
-    )
-    
-    runner = PipeLine(data_load, feature_extractor, mlp_model, n_components=128)
-    runner.run()
