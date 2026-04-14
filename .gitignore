@@ -46,4 +46,7 @@ Thumbs.db
 Desktop.ini
 .vscode/
 
-report/
+report/build/
+report/Sections/
+report/hcmut.sty
+report/main.tex
